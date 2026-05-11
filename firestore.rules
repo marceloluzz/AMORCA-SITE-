@@ -1,0 +1,176 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Fields: uid, displayName, fullName, cpf, email, photoURL, role, status, membershipDate, address, phone, gender, age, race, minIncome, residentsCount
+    //
+    // Collection: news
+    // Fields: title, content, date, authorId, imageUrl
+    //
+    // Collection: events
+    // Fields: title, description, date, location, category
+    //
+    // Collection: forum_posts
+    // Fields: title, content, authorId, authorName, date, category
+    //
+    // Collection: forum_posts/{postId}/comments
+    // Fields: postId, content, authorId, authorName, date
+    //
+    // Collection: payments
+    // Fields: memberId, amount, date, status, type, qrCodeData, dueDate
+    //
+    // Collection: notifications
+    // Fields: title, message, date, targetRole, targetUid, readBy
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         request.auth.token.email == "tchellusuzi@gmail.com");
+    }
+
+    function isCoordinator() {
+      return isAuthenticated() && 
+        (get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'coordinator' || isAdmin());
+    }
+
+    function isValidCourse(data) {
+      return data.keys().hasAll(['title', 'instructor', 'workload', 'status']) &&
+             data.title is string && data.title.size() <= 200 &&
+             data.instructor is string && data.instructor.size() <= 100 &&
+             data.workload is number &&
+             data.status in ['open', 'closed', 'in_progress', 'cancelled', 'finished'];
+    }
+
+    function isValidEnrollment(data) {
+      return data.keys().hasAll(['courseId', 'status']) &&
+             data.courseId is string && data.courseId.size() <= 128 &&
+             data.status in ['pending', 'active', 'completed', 'inactive'] &&
+             (!('userId' in data) || data.userId == null || (data.userId is string && data.userId.size() <= 128)) &&
+             (!('userEmail' in data) || data.userEmail is string) &&
+             (!('age' in data) || data.age is number || data.age is string) &&
+             (!('userName' in data) || data.userName is string) &&
+             (!('userAddress' in data) || data.userAddress is string);
+    }
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['email', 'role']) &&
+             data.email is string &&
+             data.role in ['admin', 'coordinator', 'member'] &&
+             (!('uid' in data) || data.uid is string) &&
+             (!('status' in data) || data.status is string) &&
+             (!('fullName' in data) || data.fullName is string) &&
+             (!('cpf' in data) || data.cpf is string) &&
+             (!('address' in data) || data.address is string) &&
+             (!('gender' in data) || data.gender is string) &&
+             (!('age' in data) || data.age is number || data.age is string) &&
+             (!('race' in data) || data.race is string) &&
+             (!('minIncome' in data) || data.minIncome is string) &&
+             (!('residentsCount' in data) || data.residentsCount is number || data.residentsCount is string);
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if (
+        (isAuthenticated() && isOwner(userId)) || 
+        (request.resource.data.status == 'pending_approval' && request.resource.data.role == 'member')
+      ) && isValidUser(request.resource.data);
+      allow update: if isAuthenticated() && (isOwner(userId) || isAdmin()) && isValidUser(request.resource.data);
+    }
+
+    match /news/{newsId} {
+      allow read: if true;
+      allow write: if isCoordinator();
+    }
+
+    match /events/{eventId} {
+      allow read: if true;
+      allow write: if isCoordinator();
+    }
+
+    match /forum_posts/{postId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated();
+      allow update, delete: if isAuthenticated() && (request.auth.uid == resource.data.authorId || isAdmin());
+      
+      match /comments/{commentId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated();
+        allow update, delete: if isAuthenticated() && (request.auth.uid == resource.data.authorId || isAdmin());
+      }
+    }
+
+    match /payments/{paymentId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.memberId || isCoordinator());
+      allow create: if isCoordinator();
+      allow update: if isCoordinator() || (isAuthenticated() && request.auth.uid == resource.data.memberId && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['status']));
+    }
+
+    match /expenses/{expenseId} {
+      allow read: if isAuthenticated(); // Transparency
+      allow write: if isAdmin();
+    }
+
+    match /documents/{docId} {
+      allow read: if isAuthenticated();
+      allow write: if isCoordinator();
+    }
+
+    match /suggestions/{suggestionId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.memberId || isCoordinator());
+      allow create: if isAuthenticated() && request.resource.data.memberId == request.auth.uid;
+      allow update: if isCoordinator();
+    }
+
+    match /notifications/{notificationId} {
+      allow read: if isAuthenticated();
+      allow write: if isCoordinator();
+    }
+
+    match /polls/{pollId} {
+      allow read: if isAuthenticated();
+      allow create, delete: if isCoordinator();
+      allow update: if isAuthenticated(); // Allow voting by updating 'voters' and 'votes'
+    }
+
+    match /service_requests/{requestId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.requesterId || isCoordinator());
+      allow create: if isAuthenticated();
+      allow update: if isCoordinator() || (isAuthenticated() && request.auth.uid == resource.data.requesterId);
+    }
+
+    match /courses/{courseId} {
+      allow read: if true;
+      allow write: if isCoordinator() && isValidCourse(request.resource.data);
+    }
+
+    match /enrollments/{enrollmentId} {
+      allow read: if isAuthenticated() && (request.auth.uid == resource.data.userId || isCoordinator());
+      allow create: if (
+        (isAuthenticated() && request.resource.data.userId == request.auth.uid) ||
+        (request.resource.data.status == 'pending' && request.resource.data.userEmail is string)
+      ) && isValidEnrollment(request.resource.data);
+      allow update: if isCoordinator() && isValidEnrollment(request.resource.data);
+    }
+  }
+}
